@@ -1,6 +1,7 @@
 // routes/telegramWebhook.js
 // FLOW: App + Instagram combined with delete logic
-// - Default: IMAGE(S) (1 ya zyada) -> CATEGORY -> PROMPT -> App save (saari images prompts me) -> Extra images (optional)
+// - Default: IMAGE(S) (1-10, ek saath/album) -> CATEGORY -> PROMPT -> App save (saari images ek hi prompt me, jaise admin panel ka carousel)
+//            -> Extra images (optional, sirf Instagram ke liye)
 //            -> TITLE -> CAPTION -> IG Carousel (App images pehle, phir extra) -> temp state delete
 //            /skip kisi bhi time (prompt ke baad) = Instagram pe NAHI jayega, sirf App
 // - /onlyinsta: Only Instagram Carousel (App skip) -> 2-10 images -> Title -> Caption -> IG -> temp delete
@@ -18,9 +19,10 @@ const { postCarouselToInstagram, postReelToInstagram } = require('../lib/instagr
 const CATEGORIES = [
   "Trending", "Girls", "Boys", "Couple", "Cinematic",
   "Bikes", "God", "Travel", "Birthday", "Kids",
-  "Weddings", "Vote Banner",
+  "Wedding", "Vote Banner",   // admin panel (app.js CATEGORIES) ke saath EXACT same hona chahiye
 ];
 
+const MAX_APP_IMAGES = 10;     // ek prompt me max images (admin panel MAX_SLIDES ke barabar)
 const MAX_IG_IMAGES = 10;      // Instagram carousel limit
 const ALBUM_DELAY = 3000;      // album ke liye wait (ms)
 const SINGLE_DELAY = 10000;    // alag-alag images ke liye wait (ms)
@@ -30,6 +32,8 @@ const ALLOWED_CHAT_ID = process.env.TELEGRAM_ALLOWED_CHAT_ID;
 // ---------- helpers ----------
 const ts = () => admin.firestore.FieldValue.serverTimestamp();
 const norm = (s) => String(s || '').toLowerCase().replace(/[\s_\-]+/g, '');
+// category match: space/capital/last 's' ignore (wedding = weddings = Wedding)
+const catKey = (s) => norm(s).replace(/s$/, '');
 const newToken = () => Date.now() + '-' + Math.random().toString(36).substring(2, 8);
 
 // Images state me {url, mid} objects ki tarah save hoti hain (mid = telegram message id)
@@ -64,7 +68,11 @@ function afterQuiet(stateRef, token, delay, expectedStep, fn) {
 async function finishAppImages(stateRef, chatId, s) {
   const n = urlsOf(s.appImages).length;
   await stateRef.set({ step: 'awaiting_category', updatedAt: ts() }, { merge: true });
-  await replyTo(chatId, `✅ App ke liye ${n} image${n > 1 ? 's' : ''} ready!\n\nAb category bhejo:\n${CATEGORIES.join(', ')}`);
+  let msg = n > 1
+    ? `✅ ${n} images ready! Ye sab EK hi prompt me jayengi (1st = cover, baaki slides)`
+    : `✅ App image ready!`;
+  if (n > MAX_APP_IMAGES) msg += `\n⚠️ Ek prompt me max ${MAX_APP_IMAGES} images, sirf pehli ${MAX_APP_IMAGES} jayengi.`;
+  await replyTo(chatId, `${msg}\n\nAb category bhejo:\n${CATEGORIES.join(', ')}`);
 }
 
 async function finishExtraImages(stateRef, chatId, s) {
@@ -123,7 +131,7 @@ router.post('/', async (req, res) => {
         await stateRef.delete().catch(() => {});
         await replyTo(chatId,
           `🚀 TubePilot - App + Instagram Bot\n\n` +
-          `MODE 1 (Default):\n1 ya zyada IMAGE bhejo (album bhi chalega) -> Category -> Prompt -> App me save (saari images) -> Instagram ke liye extra images / title / caption\n` +
+          `MODE 1 (Default):\n1-10 IMAGE ek saath bhejo (album) = EK hi prompt (1st = cover, baaki slides) -> Category -> Prompt -> App me save -> Instagram ke liye extra images / title / caption\n` +
           `   /done = images bhejna ho gaya (wait na karo)\n` +
           `   /same = Instagram pe sirf App wali images\n` +
           `   /skip = Instagram pe NAHI karna (sirf App)\n\n` +
@@ -349,7 +357,7 @@ router.post('/', async (req, res) => {
     if (text) {
       // Step: awaiting_category (app_plus_insta)
       if (state.step === 'awaiting_category' && state.mode === 'app_plus_insta') {
-        const match = CATEGORIES.find(c => norm(c) === norm(text));
+        const match = CATEGORIES.find(c => catKey(c) === catKey(text));
         if (!match) {
           await replyTo(chatId, `❌ "${text}" valid category nahi hai.\nValid: ${CATEGORIES.join(", ")}`);
           res.status(200).json({ ok: true }); return;
@@ -362,13 +370,13 @@ router.post('/', async (req, res) => {
       // Step: awaiting_prompt -> save to prompts + move to extra images
       if (state.step === 'awaiting_prompt' && state.mode === 'app_plus_insta') {
         try {
-          const appUrls = urlsOf(state.appImages);
+          const appUrls = urlsOf(state.appImages).slice(0, MAX_APP_IMAGES);
           if (appUrls.length === 0) throw new Error('App image nahi mili, /cancel karke dobara image bhejo');
 
+          // Admin panel jaisa hi format: imageUrl = cover, imageUrls = saari slides (ek hi prompt)
           const docRef = await db.collection('prompts').add({
-            imageUrl: appUrls[0],          // pehli image (purane app/admin ke liye compatible)
-            imageUrls: appUrls,            // saari images (multi-image)
-            imageCount: appUrls.length,
+            imageUrl: appUrls[0],          // cover (purane app versions ke liye bhi)
+            imageUrls: appUrls,            // carousel list (1 ya zyada)
             category: state.category,
             prompt: text,
             type: 'image',
@@ -386,7 +394,7 @@ router.post('/', async (req, res) => {
           }, { merge: true });
 
           await replyTo(chatId,
-            `🎉 App me upload ho gaya! ✅\nCategory: ${state.category}\nImages: ${appUrls.length}\n\n` +
+            `🎉 App me upload ho gaya! ✅\nCategory: ${state.category}\nImages: ${appUrls.length}${appUrls.length > 1 ? ' (ek hi prompt me carousel)' : ''}\n\n` +
             `Ab Instagram ke liye:\n` +
             `📸 Aur images bhejo (total max ${MAX_IG_IMAGES}, App wali pehle aayengi)\n` +
             `➡️ /same - sirf App wali image${appUrls.length > 1 ? 's' : ''} se post\n` +
